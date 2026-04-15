@@ -21,10 +21,21 @@ import (
 )
 
 const (
-	serviceName   = "CoderJia-TimeKeeper"
-	ntpServerAddr = "ntp.aliyun.com:123"
-	ntpDelta      = 2208988800 // NTP epoch (1900) to Unix epoch (1970)
+	serviceName = "CoderJia-TimeKeeper"
+	ntpDelta    = 2208988800 // NTP epoch (1900) to Unix epoch (1970)
 )
+
+// 中国大陆常用 NTP（UDP 123），按顺序尝试，失败则换下一个。
+var ntpServers = []string{
+	"ntp.aliyun.com:123",
+	"ntp1.aliyun.com:123",
+	"ntp2.aliyun.com:123",
+	"ntp.tencent.com:123",
+	"time1.tencent.com:123",
+	"time2.tencent.com:123",
+	"ntp.ntsc.ac.cn:123",
+	"cn.pool.ntp.org:123",
+}
 
 var (
 	modkernel32   = syscall.NewLazyDLL("kernel32.dll")
@@ -55,7 +66,7 @@ func newTimekeeper() *timekeeper {
 }
 
 func (t *timekeeper) initFromNTP() error {
-	unixTs, err := queryNTPUnix(ntpServerAddr, 5*time.Second)
+	unixTs, addr, err := queryNTPUnixFirstOK(ntpServers, 5*time.Second)
 	if err != nil {
 		return err
 	}
@@ -65,7 +76,7 @@ func (t *timekeeper) initFromNTP() error {
 	t.baseMono = nowMono
 	t.lastSync = nowMono
 	t.mu.Unlock()
-	log.Printf("NTP 校时成功: unix=%d server=%s", unixTs, ntpServerAddr)
+	log.Printf("NTP 校时成功: unix=%d server=%s", unixTs, addr)
 	return nil
 }
 
@@ -87,6 +98,22 @@ func (t *timekeeper) maybeResync() {
 	if err := t.initFromNTP(); err != nil {
 		log.Printf("NTP 重同步失败: %v", err)
 	}
+}
+
+func queryNTPUnixFirstOK(addrs []string, timeout time.Duration) (unix int64, used string, err error) {
+	var errs []error
+	for _, addr := range addrs {
+		u, e := queryNTPUnix(addr, timeout)
+		if e == nil {
+			return u, addr, nil
+		}
+		log.Printf("NTP 尝试失败 server=%s: %v", addr, e)
+		errs = append(errs, fmt.Errorf("%s: %w", addr, e))
+	}
+	if len(errs) == 0 {
+		return 0, "", errors.New("未配置任何 NTP 服务器")
+	}
+	return 0, "", fmt.Errorf("全部 NTP 不可用（%d 个节点均失败）: %w", len(addrs), errors.Join(errs...))
 }
 
 func queryNTPUnix(addr string, timeout time.Duration) (int64, error) {
