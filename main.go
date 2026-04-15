@@ -162,8 +162,6 @@ func runCore(stop <-chan struct{}) error {
 			current := tk.currentUTCTime()
 			if err := setSystemUTC(current); err != nil {
 				log.Printf("设置系统时间失败: %v", err)
-			} else {
-				log.Printf("系统时间已覆盖为 UTC: %s", current.Format(time.RFC3339Nano))
 			}
 		}
 	}
