@@ -62,7 +62,7 @@ type timekeeper struct {
 }
 
 func newTimekeeper() *timekeeper {
-	return &timekeeper{resyncDur: time.Hour}
+	return &timekeeper{resyncDur: 10 * time.Minute}
 }
 
 func (t *timekeeper) initFromNTP() error {
@@ -263,7 +263,7 @@ func installService(exePath string) error {
 	cfg := mgr.Config{
 		DisplayName: serviceName,
 		StartType:   mgr.StartAutomatic,
-		Description: "Fix Windows hardware clock freeze by forcing UTC sync every second.",
+		Description: "通过 NTP 获取标准时间并每秒校正系统 UTC，用于缓解硬件时钟停滞或走时异常。By coderjia@qq.com",
 	}
 
 	s, err := m.CreateService(serviceName, exePath, cfg)
