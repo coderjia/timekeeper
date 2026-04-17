@@ -8,6 +8,16 @@
 # Logs
 *.log
 
+# Archives
+*.zip
+*.rar
+*.7z
+*.tar
+*.gz
+*.tgz
+*.bz2
+*.xz
+
 # Go build/test artifacts
 *.test
 *.out
