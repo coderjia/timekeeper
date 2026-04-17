@@ -21,8 +21,9 @@ import (
 )
 
 const (
-	serviceName = "CoderJia-TimeKeeper"
-	ntpDelta    = 2208988800 // NTP epoch (1900) to Unix epoch (1970)
+	serviceName        = "CoderJia-TimeKeeper"
+	w32TimeServiceName = "W32Time"  // Windows 自带时间同步服务，与本程序抢改系统时间冲突
+	ntpDelta           = 2208988800 // NTP epoch (1900) to Unix epoch (1970)
 )
 
 // 中国大陆常用 NTP（UDP 123），按顺序尝试，失败则换下一个。
@@ -169,8 +170,109 @@ func setSystemUTC(t time.Time) error {
 	return nil
 }
 
+func waitForServiceState(s *mgr.Service, want svc.State, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for {
+		st, err := s.Query()
+		if err != nil {
+			return err
+		}
+		if st.State == want {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("等待服务状态超时: 当前=%v 期望=%v", st.State, want)
+		}
+		time.Sleep(300 * time.Millisecond)
+	}
+}
+
+// disableWindowsTimeService 停止并禁用 W32Time，避免与 SetSystemTime 周期性校时互相覆盖。
+func disableWindowsTimeService() error {
+	m, err := mgr.Connect()
+	if err != nil {
+		return fmt.Errorf("连接服务管理器失败: %w", err)
+	}
+	defer m.Disconnect()
+
+	s, err := m.OpenService(w32TimeServiceName)
+	if err != nil {
+		if errors.Is(err, windows.ERROR_SERVICE_DOES_NOT_EXIST) {
+			log.Printf("未找到 %s 服务，跳过禁用", w32TimeServiceName)
+			return nil
+		}
+		return fmt.Errorf("打开 %s: %w", w32TimeServiceName, err)
+	}
+	defer s.Close()
+
+	st, err := s.Query()
+	if err != nil {
+		return err
+	}
+	if st.State == svc.Running || st.State == svc.StopPending {
+		if _, err := s.Control(svc.Stop); err != nil {
+			return fmt.Errorf("停止 %s: %w", w32TimeServiceName, err)
+		}
+		if err := waitForServiceState(s, svc.Stopped, 30*time.Second); err != nil {
+			return err
+		}
+	}
+
+	cfg, err := s.Config()
+	if err != nil {
+		return fmt.Errorf("读取 %s 配置: %w", w32TimeServiceName, err)
+	}
+	cfg.StartType = mgr.StartDisabled
+	if err := s.UpdateConfig(cfg); err != nil {
+		return fmt.Errorf("禁用 %s: %w", w32TimeServiceName, err)
+	}
+	log.Printf("已停止并禁用 Windows Time 服务 (%s)", w32TimeServiceName)
+	return nil
+}
+
+func restoreWindowsTimeService() error {
+	m, err := mgr.Connect()
+	if err != nil {
+		return fmt.Errorf("连接服务管理器失败: %w", err)
+	}
+	defer m.Disconnect()
+
+	s, err := m.OpenService(w32TimeServiceName)
+	if err != nil {
+		if errors.Is(err, windows.ERROR_SERVICE_DOES_NOT_EXIST) {
+			return nil
+		}
+		return fmt.Errorf("打开 %s: %w", w32TimeServiceName, err)
+	}
+	defer s.Close()
+
+	cfg, err := s.Config()
+	if err != nil {
+		return fmt.Errorf("读取 %s 配置: %w", w32TimeServiceName, err)
+	}
+	cfg.StartType = mgr.StartAutomatic
+	if err := s.UpdateConfig(cfg); err != nil {
+		return fmt.Errorf("恢复 %s 为自动启动: %w", w32TimeServiceName, err)
+	}
+
+	st, err := s.Query()
+	if err != nil {
+		return err
+	}
+	if st.State == svc.Stopped {
+		if err := s.Start(); err != nil {
+			return fmt.Errorf("启动 %s: %w", w32TimeServiceName, err)
+		}
+	}
+	log.Printf("已恢复 Windows Time 服务 (%s) 为自动启动并已尝试启动", w32TimeServiceName)
+	return nil
+}
+
 func runCore(stop <-chan struct{}) error {
 	log.Println("核心守护进程启动")
+	if err := disableWindowsTimeService(); err != nil {
+		log.Printf("禁用 Windows Time 服务失败（可能与系统自带时间同步冲突）: %v", err)
+	}
 	tk := newTimekeeper()
 	if err := tk.initFromNTP(); err != nil {
 		return fmt.Errorf("初始化 NTP 校时失败: %w", err)
@@ -299,6 +401,9 @@ func removeService() error {
 		return fmt.Errorf("删除服务失败: %w", err)
 	}
 	log.Printf("服务卸载成功: %s", serviceName)
+	if err := restoreWindowsTimeService(); err != nil {
+		return fmt.Errorf("服务已卸载，但恢复 Windows Time (W32Time) 失败: %w", err)
+	}
 	return nil
 }
 
